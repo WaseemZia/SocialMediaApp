@@ -4,26 +4,27 @@ using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Microsoft.EntityFrameworkCore;
 
 namespace Domain
 {
+    [Index(nameof(Date))]
     public class Activity
     {
-        [Key]
-        //[MaxLength(450)]
         public string Id { get; set; } = Guid.NewGuid().ToString();
-        //public int Id { get; set; } 
         public required string Title { get; set; }
         public DateTime Date { get; set; }
-        public required string Description { get; set; }
-        public required string Category { get; set; }
-        public bool IsCancelled { get; set; }
+        public  string Description { get; set; }
+        public  string Category { get; set; }
+        public bool IsCancelled { get; set; } 
         // location props
-        public required string City { get; set; }
-        public required string Venue { get; set; }
+        public  string City { get; set; }
+        public  string Venue { get; set; }
         public double Latitude { get; set; }
         public double Longitude { get; set; }
 
-
+        //Navigation Properties 
+        public ICollection<ActivityAttendee> Attendees { get; set; } = [];
+        public ICollection<Comment> Comments { get; set; } = [];
     }
 }
