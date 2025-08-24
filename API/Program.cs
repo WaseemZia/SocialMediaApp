@@ -1,20 +1,106 @@
+﻿using Application;
+using Application.Activities.Queries;
+using Application.Activities.Validators;
+using FluentValidation;
 using Microsoft.EntityFrameworkCore;
 using Persistence;
+using Application.Core;
+using API.Middleware;
+using Domain;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc.Authorization;
+using Application.interfaces;
+using Infrastructure.Security;
+using Infrastructure;
+using Infrastructure.Photos;
+using Application.Interfaces;
+using API.SignalR;
+using Resend;
+using Infrastructure.Email;
+
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 
-builder.Services.AddControllers();
+builder.Services.AddControllers(opt =>
+{
+    var policy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build();
+    opt.Filters.Add(new AuthorizeFilter(policy));
+});
+//builder.Services.AddControllers();
+builder.Services.ConfigureApplicationCookie(options =>
+{
+    options.Cookie.HttpOnly = true;
+    options.Cookie.SameSite = SameSiteMode.None; // ✅ MUST be None for cross-origin
+    options.Cookie.SecurePolicy = CookieSecurePolicy.Always; // ✅ MUST be Secure for browser to store it
+});
+
+builder.Services.AddScoped<IUserAccessor, UserAccessor>();
+builder.Services.AddScoped<IPhotoService, PhotoService>();
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
-//builder.Services.AddDbContext<AppDbContext>(options =>
-//    options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("CorsPolicy", policy =>
+    {
+        policy.WithOrigins("http://localhost:3000", "https://localhost:3000")
+        //policy.AllowAnyOrigin()
+        .AllowCredentials()
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+});
 
-builder.Services.AddOpenApi();
+builder.Services.AddMediatR(opt =>
+{
+    opt.RegisterServicesFromAssemblyContaining<GetActivityList.Handler>();
+    //opt.AddBehavior(typeof(ValidationBehavior<,>));
+});
+builder.Services.AddAutoMapper(typeof(MappingProfile));
+builder.Services.AddValidatorsFromAssemblyContaining<CreateActivityValidator>();
 
+builder.Services.AddHttpClient<ResendClient>();
+builder.Services.Configure<ResendClientOptions>(opt =>
+{
+    opt.ApiToken = builder.Configuration["Resend:ApiToken"]!;
+});
+builder.Services.AddTransient<IResend, ResendClient>();
+builder.Services.AddTransient<IEmailSender<User>, EmailSender>();
+builder.Services.AddTransient<ExceptionMiddleware>();
+
+builder.Services.AddIdentityApiEndpoints<User>(opt =>
+{
+    opt.User.RequireUniqueEmail = true;
+    opt.SignIn.RequireConfirmedEmail = true;
+})
+    .AddRoles<IdentityRole>()
+    .AddEntityFrameworkStores<AppDbContext>();
+builder.Services.AddAuthorization(opt =>
+{
+    opt.AddPolicy("IsActivityHost", policy =>
+    {
+        policy.Requirements.Add(new IsHostRequirement());
+    });
+});
+builder.Services.AddOptions();
+//builder.Services.AddHttpClient<ResendClient>();
+
+//builder.Services.Configure<ResendClientOptions>(opt =>
+//{
+//    opt.ApiToken = builder.Configuration["Resend:ApiToken"]!;
+//});
+
+//builder.Services.AddSingleton<IResend, ResendClient>();
+//builder.Services.AddSingleton<IEmailSender<User>, EmailSender>();
+
+
+builder.Services.AddTransient<IAuthorizationHandler, IsHostRequirementHandler>();
+builder.Services.Configure<ClaudinarySetting>(builder.Configuration.GetSection("ClaudinarySettings"));
+builder.Services.AddSignalR();
 var app = builder.Build();
-
+app.UseMiddleware<ExceptionMiddleware>();
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
@@ -22,21 +108,32 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-
+app.UseCors("CorsPolicy");
 app.UseAuthorization();
 
+app.UseAuthentication();
+app.UseDefaultFiles();
+app.UseStaticFiles();
+//app.MapGroup("/api").MapIdentityApi<User>();
+//app.MapIdentityApi<IdentityUser>();
+
 app.MapControllers();
+app.MapHub<CommentHub>("/comments");
+//app.MapFallbackToController("Index", "Fallback");
 using var scope = app.Services.CreateScope();
 var services = scope.ServiceProvider;
+
 try
 {
     var context = services.GetRequiredService<AppDbContext>();
+    var userManager = services.GetRequiredService<UserManager<User>>();
     await context.Database.MigrateAsync();
-    await DbInitializer.SeedData(context);
-    
-}catch(Exception ex)
+    await DbInitializer.SeedData(context, userManager);
+
+}
+catch (Exception ex)
 {
-     var logger = services.GetRequiredService<ILogger<Program>>();
+    var logger = services.GetRequiredService<ILogger<Program>>();
     logger.LogError(ex, "An Exception occurred");
 }
 app.Run();
