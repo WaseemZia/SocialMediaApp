@@ -16,6 +16,8 @@ using Infrastructure;
 using Infrastructure.Photos;
 using Application.Interfaces;
 using API.SignalR;
+using Resend;
+using Infrastructure.Email;
 
 
 var builder = WebApplication.CreateBuilder(args);
@@ -36,7 +38,7 @@ builder.Services.ConfigureApplicationCookie(options =>
 });
 
 builder.Services.AddScoped<IUserAccessor, UserAccessor>();
-builder.Services.AddScoped<IPhotoService , PhotoService>();
+builder.Services.AddScoped<IPhotoService, PhotoService>();
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 builder.Services.AddCors(options =>
@@ -55,14 +57,23 @@ builder.Services.AddMediatR(opt =>
 {
     opt.RegisterServicesFromAssemblyContaining<GetActivityList.Handler>();
     //opt.AddBehavior(typeof(ValidationBehavior<,>));
-        });
+});
 builder.Services.AddAutoMapper(typeof(MappingProfile));
 builder.Services.AddValidatorsFromAssemblyContaining<CreateActivityValidator>();
+
+builder.Services.AddHttpClient<ResendClient>();
+builder.Services.Configure<ResendClientOptions>(opt =>
+{
+    opt.ApiToken = builder.Configuration["Resend:ApiToken"]!;
+});
+builder.Services.AddTransient<IResend, ResendClient>();
+builder.Services.AddTransient<IEmailSender<User>, EmailSender>();
 builder.Services.AddTransient<ExceptionMiddleware>();
 
 builder.Services.AddIdentityApiEndpoints<User>(opt =>
 {
     opt.User.RequireUniqueEmail = true;
+    opt.SignIn.RequireConfirmedEmail = true;
 })
     .AddRoles<IdentityRole>()
     .AddEntityFrameworkStores<AppDbContext>();
@@ -73,6 +84,18 @@ builder.Services.AddAuthorization(opt =>
         policy.Requirements.Add(new IsHostRequirement());
     });
 });
+builder.Services.AddOptions();
+//builder.Services.AddHttpClient<ResendClient>();
+
+//builder.Services.Configure<ResendClientOptions>(opt =>
+//{
+//    opt.ApiToken = builder.Configuration["Resend:ApiToken"]!;
+//});
+
+//builder.Services.AddSingleton<IResend, ResendClient>();
+//builder.Services.AddSingleton<IEmailSender<User>, EmailSender>();
+
+
 builder.Services.AddTransient<IAuthorizationHandler, IsHostRequirementHandler>();
 builder.Services.Configure<ClaudinarySetting>(builder.Configuration.GetSection("ClaudinarySettings"));
 builder.Services.AddSignalR();
@@ -86,20 +109,20 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 app.UseCors("CorsPolicy");
+app.UseAuthorization();
 
 app.UseAuthentication();
-app.UseAuthorization();
-// ✅ Serve static frontend files
-app.UseStaticFiles();  // Serves files from wwwroot
+app.UseDefaultFiles();
+app.UseStaticFiles();
+//app.MapGroup("/api").MapIdentityApi<User>();
+//app.MapIdentityApi<IdentityUser>();
 
-// ✅ Handle React routes like /activities/123
-app.MapFallbackToFile("index.html");
 app.MapControllers();
-app.MapGroup("/api").MapIdentityApi<User>();
 app.MapHub<CommentHub>("/comments");
-
+//app.MapFallbackToController("Index", "Fallback");
 using var scope = app.Services.CreateScope();
 var services = scope.ServiceProvider;
+
 try
 {
     var context = services.GetRequiredService<AppDbContext>();
