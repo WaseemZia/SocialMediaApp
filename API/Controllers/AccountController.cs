@@ -19,7 +19,7 @@ namespace API.Controllers
         private readonly SignInManager<User> _signInManager;
         private readonly IEmailSender<User> _emailSender;
         private readonly IConfiguration config;
-        public AccountController(SignInManager<User> signInManager,IEmailSender<User> emailSender,
+        public AccountController(SignInManager<User> signInManager, IEmailSender<User> emailSender,
             IConfiguration config)
         {
             _signInManager = signInManager;
@@ -56,7 +56,7 @@ namespace API.Controllers
             var result = await _signInManager.UserManager.CreateAsync(user, registerDto.Password);
             if (result.Succeeded)
             {
-                await SendConfirmationEmailAsync(user,registerDto.Email);
+                await SendConfirmationEmailAsync(user, registerDto.Email);
                 return Ok();
             }
             foreach (var error in result.Errors)
@@ -68,14 +68,14 @@ namespace API.Controllers
         }
         [AllowAnonymous]
         [HttpGet("resendConfirmEmail")]
-        public async Task<ActionResult> ResendConfirmEmail(string? email,string?userId)
+        public async Task<ActionResult> ResendConfirmEmail(string? email, string? userId)
         {
-            if (string.IsNullOrEmpty(email) && string.IsNullOrEmpty(userId) )
-                {
+            if (string.IsNullOrEmpty(email) && string.IsNullOrEmpty(userId))
+            {
                 return BadRequest("Email or UserId must be provided");
             }
             var user = await _signInManager.UserManager.Users.FirstOrDefaultAsync
-                (x=>x.Email == email || x.Id == userId);
+                (x => x.Email == email || x.Id == userId);
             if (user == null || string.IsNullOrEmpty(user.Email)) return BadRequest("User not found");
             await SendConfirmationEmailAsync(user, user.Email);
             return Ok();
@@ -87,7 +87,7 @@ namespace API.Controllers
             var confirmEmailUrl = $"{config["ClientAppUrl"]}/confirm-email?userId={user.Id}&code={code}";
 
 
-            await _emailSender.SendConfirmationLinkAsync(user,email,confirmEmailUrl);
+            await _emailSender.SendConfirmationLinkAsync(user, email, confirmEmailUrl);
         }
 
         [AllowAnonymous]
@@ -136,28 +136,63 @@ namespace API.Controllers
 
             if (result.Succeeded)
             {
-                // Return a small payload; cookie is already issued by Identity
-                //return Ok(new
-                //{
-                //    user.Id,
-                //    user.DisplayName,
-                //    user.Email,
-                //    user.ImageUrl
-                //});
+
                 return Ok(1);
             }
 
             //if (result.IsLockedOut) return Forbid("LockedOut");
             //if (result.RequiresTwoFactor) return Forbid("RequiresTwoFactor");
 
-            return Unauthorized(new { error = "Invalid email or password." });
+            //return Unauthorized(new { error = "Invalid email or password." });
+            return Problem(
+            title: "Unauthorized",
+            statusCode: StatusCodes.Status401Unauthorized,
+            detail: "Failed",
+               type: "https://httpstatuses.com/401"
+);
+
         }
-    
+
         [HttpPost("logout")]
         public async Task<ActionResult> Logout()
         {
             await _signInManager.SignOutAsync();
             return NoContent();
         }
+        [HttpPost("change-password")]
+        public async Task<ActionResult> ChangePassword(ChangePasswordDto passwordDto)
+        {
+            var user = await _signInManager.UserManager.GetUserAsync(User);
+            if (user == null) return Unauthorized();
+            var result = await _signInManager.UserManager.ChangePasswordAsync(user, passwordDto.CurrentPassword, passwordDto.NewPassword);
+            if (result.Succeeded) { return Ok(); }
+            return BadRequest(result.Errors.First().Description);
+
+        }
+        [AllowAnonymous]
+        [HttpPost("forgotPassword")]
+        public async Task<ActionResult> ForgetPassword(ForgotPasswordDto forgotPasswordDto)
+        {
+            var user = await _signInManager.UserManager.FindByEmailAsync(forgotPasswordDto.email);
+            if (user == null || !await _signInManager.UserManager.IsEmailConfirmedAsync(user)) return Ok();
+            var code = await _signInManager.UserManager.GeneratePasswordResetTokenAsync(user);
+            var deCode = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(code));
+            await _emailSender.SendPasswordResetCodeAsync(user, forgotPasswordDto.email, deCode);
+            return Ok();
+        }
+        [AllowAnonymous]
+        [HttpPost("resetPassword")]
+        public async Task<ActionResult> ResetPassword(ResetPasswordDto resetPasswordDto)
+        {
+            var user = await _signInManager.UserManager.FindByEmailAsync(resetPasswordDto.email);
+            if (user == null) return Ok();
+            //var code = await _signInManager.UserManager.GeneratePasswordResetTokenAsync(user);
+
+            var decoded = Encoding.UTF8.GetString(WebEncoders.Base64UrlDecode(resetPasswordDto.ResetCode));
+            var result = await _signInManager.UserManager.ResetPasswordAsync(user, decoded, resetPasswordDto.NewPassword);
+            if (result.Succeeded) return Ok();
+            return BadRequest(result.Errors.First().Description);
+        }
+
     }
 }
