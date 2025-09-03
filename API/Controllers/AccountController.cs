@@ -1,4 +1,6 @@
-﻿using System.Text;
+﻿using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
 using API.DTOs;
 using Domain;
 using Microsoft.AspNetCore.Authorization;
@@ -8,6 +10,8 @@ using Microsoft.AspNetCore.Identity.UI.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
+using static API.DTOs.GitHubInfo;
+using static API.DTOs.GoogleInfo;
 
 namespace API.Controllers
 {
@@ -26,6 +30,141 @@ namespace API.Controllers
             _emailSender = emailSender;
             this.config = config;
         }
+
+
+        [AllowAnonymous]
+        [HttpPost("login-github")]
+        public async Task<ActionResult> LoginWithGithub(string code)
+        {
+            if (string.IsNullOrEmpty(code)) return
+                    BadRequest("Missing authorization code");
+
+            using var httpclient = new HttpClient();
+            // getting response in json format from github
+            httpclient.DefaultRequestHeaders.Accept.
+                Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+            // step 1 - exchange code for access token
+
+            var tokenResponse = await httpclient.PostAsJsonAsync(
+                "https://github.com/login/oauth/access_token",
+                new GitHubAuthRequest
+                {
+                    Code= code,
+                    ClientId = config["Authenication:Github:ClientId"]!,
+                    ClientSecret = config["Authenication:Github:ClientSecret"]!,
+                    RedirectUri = $"{config["ClientAppUrl"]}/auth-callback"
+                });
+            if (!tokenResponse.IsSuccessStatusCode)
+                return BadRequest("Failed to get access token");
+            var tokenContent = await tokenResponse.Content.ReadFromJsonAsync<GitHubTokenResponse>();
+            if (string.IsNullOrEmpty(tokenContent?.AccessToken))
+                return BadRequest("Failed to reterive access Token");
+            // getting user info from github
+            httpclient.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer",tokenContent.AccessToken);
+            httpclient.DefaultRequestHeaders.UserAgent.ParseAdd("Reactivities");
+            var userReponse = await httpclient.GetAsync("https://api.github.com/user");
+            if (userReponse == null) return BadRequest("Failed to get from github");
+            var user = await userReponse.Content.ReadFromJsonAsync<GitHubUser>();
+            if (user == null) return BadRequest("Failed to read user from GitHub");
+            //getting email if needed because some poeples have private email , if public then not needed
+            if(string.IsNullOrEmpty(user?.Email))
+            {
+                var emailResponse = await httpclient.GetAsync("https://api.github.com/user/emails");
+                if(emailResponse.IsSuccessStatusCode)
+                {
+                    var emails = await emailResponse.Content.ReadFromJsonAsync<List<GitHubEmail>>();
+                    var primary = emails?.FirstOrDefault(e => e is { Primary: true, Verified: true })?.Email;
+                    if(string.IsNullOrEmpty(primary))
+                    {
+                        return BadRequest("Failed to get Email from Github");
+                    }
+                    user.Email = primary;
+                }
+            }
+            // find and create user and sign in 
+            var existingUser = await _signInManager.UserManager.FindByEmailAsync(user!.Email);
+            if (existingUser == null)
+            {
+                 existingUser = new User
+                {
+                     Email=user.Email,
+                     UserName=user.Email,
+                     DisplayName=user.Name,
+                     ImageUrl= user.ImageUrl,
+                };
+                var createdResult = await _signInManager.UserManager.CreateAsync(existingUser);
+                if (!createdResult.Succeeded)
+                    return BadRequest("Failed to create user");
+            }
+            await _signInManager.SignInAsync(existingUser,false);   
+            return Ok();
+        }
+
+
+        [AllowAnonymous]
+        [HttpPost("login-google")]
+        public async Task<ActionResult> LoginWithGoogle(string code)
+        {
+            if (string.IsNullOrEmpty(code)) return
+                    BadRequest("Missing authorization code");
+
+            using var httpclient = new HttpClient();
+            // getting response from Google  in json format
+            httpclient.DefaultRequestHeaders.Accept.
+                Add(new MediaTypeWithQualityHeaderValue("application/x-www-form-urlencoded"));
+
+            // exchange token 
+            var tokenResponse = await httpclient.PostAsJsonAsync("https://oauth2.googleapis.com/token",
+                new GoogleAuthRequest
+                {
+                    Code = code,
+                    ClientId = config["Authenication:Google:ClientId"]!,
+                    ClientSecret = config["Authenication:Google:ClientSecret"]!,
+                    RedirectUri = $"{config["ClientAppUrl"]}/auth-callbackgoogle",
+                    GrantType= "authorization_code"
+
+                });
+            if(!tokenResponse.IsSuccessStatusCode)
+            {
+                return BadRequest("Failed to get Token ");
+            }
+            var tokenContent = await tokenResponse.Content.ReadFromJsonAsync<GoogleTokenResponse>();
+            if(string.IsNullOrEmpty(tokenContent.AccessToken))
+            {
+                return BadRequest("Failed to get Access Token");
+            }
+            /// getting user information 
+            httpclient.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", tokenContent.AccessToken);
+            httpclient.DefaultRequestHeaders.UserAgent.ParseAdd("Reactivities");
+            var userResponse = await httpclient.GetAsync("https://openidconnect.googleapis.com/v1/userinfo");
+            if (!userResponse.IsSuccessStatusCode) {
+                return BadRequest("Failed to fetch User Info");
+            };
+            var user = await userResponse.Content.ReadFromJsonAsync<GoogleUserInfo>();
+            if (user == null) {
+                return BadRequest("User not fetched from Google");
+            }
+            var existingUser = await _signInManager.UserManager.FindByEmailAsync(user?.Email);
+            if (existingUser == null)
+            {
+                existingUser = new User
+                {
+                    Email=user.Email,
+                    UserName=user.Email,
+                    DisplayName=user.Name,
+                    ImageUrl=user.Picture
+                };
+                var createdUser = await _signInManager.UserManager.CreateAsync(existingUser);
+                if (createdUser == null) { return BadRequest("Failed to Create User"); }
+            }
+
+
+            await _signInManager.SignInAsync(existingUser,false);
+            return Ok();
+        }
+
         [AllowAnonymous]
         [HttpGet("confirmEmail")]
         public async Task<IActionResult> ConfirmEmail(string userId, string code)
@@ -97,6 +236,7 @@ namespace API.Controllers
             if (User.Identity?.IsAuthenticated == false) return NoContent();
 
             var user = await _signInManager.UserManager.GetUserAsync(User);
+            var hashPassword = await _signInManager.UserManager.HasPasswordAsync(user);
             if (user == null) return NoContent();
             return Ok(
                 new
@@ -104,7 +244,8 @@ namespace API.Controllers
                     user.DisplayName,
                     user.Email,
                     user.Id,
-                    user.ImageUrl
+                    user.ImageUrl,
+                    hashPassword
                 });
         }
         [AllowAnonymous]
